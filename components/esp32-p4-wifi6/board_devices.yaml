@@ -1,0 +1,207 @@
+# Devices Configuration
+devices:
+  - name: audio_dac
+    chip: es8311
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: false
+
+      dac_enabled: true
+      dac_max_channel: 1
+      # DAC channel mask, 1-enable, 0-disable, layout: left,right
+      dac_channel_mask: "1"        # Left enable
+
+    # Power amplifier configuration
+    peripherals:
+      - name: gpio_power_amp
+        gain: 6                    # dB
+        active_level: 1            # 0-low, 1-high
+      - name: i2s_audio_out
+      - name: i2c_master
+        address: 0x30
+        frequency: 400000          # Hz
+
+  - name: audio_adc
+    chip: es7210
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: true
+      adc_max_channel: 4
+      adc_channel_mask: "0111"
+      adc_channel_labels: ['NA', 'RE', 'FR', 'FL'] # MSB ~ LSB
+      adc_init_gain: 0           # dB
+
+    # Power amplifier configuration
+    peripherals:
+      # I2S interface configuration
+      - name: i2s_audio_in
+      # I2C interface configuration
+      - name: i2c_master
+        address: 0x80
+        frequency: 400000          # Hz
+
+  - name: fs_sdcard
+    type: fs_fat
+    sub_type: sdmmc
+    version: default
+    config:
+      sub_config:
+        bus_width: 1            # 1, 4, 8, not used on SPI type
+        pins:
+          clk: 15  # GPIO_NUM_15
+          cmd: 7   # GPIO_NUM_7
+          d0: 4    # GPIO_NUM_4
+
+  - name: gpio_expander
+    chip: tca9554
+    type: gpio_expander
+    version: default
+    dependencies:
+      espressif/esp_io_expander_tca9554: "^2"
+    config:
+      max_pins: 8                      # Maximum number of GPIO pins supported
+      output_io_mask: [1, 2, 3]        # List of pins configured as output
+      output_io_level_mask: [1, 1, 1]  # List of pins with initial output level
+      input_io_mask: NULL
+    peripherals:
+      - name: i2c_master
+        i2c_addr: [0x70, 0x40]         # I2C address of the IO expander
+
+  - name: display_lcd          # The name of the device, must be unique
+    type: display_lcd          # The type of the device, must be unique
+    version: 1.0.0
+    sub_type: dsi              # The sub type: dsi, spi, or parlio
+    chip: generic_lcd          # [TO_BE_CONFIRMED] LCD chip type (generic)
+    dependencies:
+      espressif/esp_lcd_generic: "*"  # [TO_BE_CONFIRMED] Component dependency for the LCD chip
+    config:
+      invert_color: false  # Invert color flag (default: false)
+      need_reset: true                          # Whether to reset the LCD panel during initialization (default: true)
+      reset_gpio_num: 33                        # [IO] GPIO pin for reset signal (use -1 if RST not from SoC)
+      rgb_ele_order: LCD_RGB_ELEMENT_ORDER_RGB  # [TO_BE_CONFIRMED] RGB element order (default: RGB)
+      # Valid values:
+      # - LCD_RGB_ELEMENT_ORDER_RGB
+      # - LCD_RGB_ELEMENT_ORDER_BGR
+      data_endian: LCD_RGB_DATA_ENDIAN_BIG      # [TO_BE_CONFIRMED] Data endianness (default: BIG)
+      # Valid values:
+      # - LCD_RGB_DATA_ENDIAN_BIG
+      # - LCD_RGB_DATA_ENDIAN_LITTLE
+      bits_per_pixel: 24                        # [TO_BE_CONFIRMED] Bits per pixel (24bpp, RGB888)
+      reset_active_high: 0                      # Reset pin active level (0 = active low)
+
+      # DBI interface configuration (command/parameter transfer)
+      dbi_config:
+        virtual_channel: 0  # Virtual channel number (default: 0)
+        lcd_cmd_bits: 8     # Bit width of LCD command (default: 8)
+        lcd_param_bits: 8   # Bit width of LCD parameter (default: 8)
+
+      # DPI interface configuration (pixel data transfer)
+      dpi_config:
+        virtual_channel: 0                           # Virtual channel number (default: 0)
+        dpi_clk_src: MIPI_DSI_DPI_CLK_SRC_DEFAULT    # DPI clock source (default)
+        # Refer to `soc_periph_mipi_dsi_dpi_clk_src_t` for valid values
+        dpi_clock_freq_mhz: 80                       # [TO_BE_CONFIRMED] DPI pixel clock MHz from panel budget
+        pixel_format: LCD_COLOR_PIXEL_FORMAT_RGB565  # [TO_BE_CONFIRMED] Pixel format that used by the MIPI LCD device (default: RGB565)
+        # Valid values
+        # - LCD_COLOR_PIXEL_FORMAT_RGB565
+        # - LCD_COLOR_PIXEL_FORMAT_RGB666
+        # - LCD_COLOR_PIXEL_FORMAT_RGB888
+        in_color_format: LCD_COLOR_FMT_RGB565        # [TO_BE_CONFIRMED] Input color format (default: RGB565)
+        # Valid values
+        # - LCD_COLOR_FMT_RGB565
+        # - LCD_COLOR_FMT_RGB666
+        # - LCD_COLOR_FMT_RGB888
+        # - LCD_COLOR_FMT_YUV422
+        # - LCD_COLOR_FMT_GRAY8
+        out_color_format: LCD_COLOR_FMT_RGB565       # [TO_BE_CONFIRMED] Output color format (default: RGB565)
+        num_fbs: 1                                   # Number of frame buffers (default: 1)
+        flags:
+          use_dma2d: true                         # Use DMA2D for pixel data transfer (default: false)
+          disable_lp: false                        # Disable low power mode (default: false)
+
+        # Video timing parameters (resolution + sync signals)
+        video_timing:
+          h_size: 720            # [TO_BE_CONFIRMED] Horizontal resolution
+          v_size: 1280             # [TO_BE_CONFIRMED] Vertical resolution
+          hsync_back_porch: 239   # [TO_BE_CONFIRMED] Horizontal back porch
+          hsync_pulse_width: 50   # [TO_BE_CONFIRMED] Horizontal sync pulse width
+          hsync_front_porch: 33  # [TO_BE_CONFIRMED] Horizontal front porch
+          vsync_back_porch: 20    # [TO_BE_CONFIRMED] Vertical back porch
+          vsync_pulse_width: 30    # [TO_BE_CONFIRMED] Vertical sync pulse width
+          vsync_front_porch: 2   # [TO_BE_CONFIRMED] Vertical front porch
+
+    peripherals:
+      - name: ldo_mipi          # [TO_BE_CONFIRMED] LDO peripheral for dsi power management
+      - name: dsi_display       # [TO_BE_CONFIRMED] DSI peripheral instance used for this display
+
+  # Touch Panel Configuration
+  - name: lcd_touch
+    chip: tt21100
+    type: lcd_touch_i2c
+    version: default
+    dependencies:
+      espressif/esp_lcd_touch_tt21100: ">=1.0.0"
+    config:
+      # esp_lcd_panel_io_i2c_config_t fields for touch communication
+      io_i2c_config:
+        dev_addr: 0x24
+        lcd_cmd_bits: 16                  # Bit-width of LCD command
+        peripherals:
+          - name: i2c_master              # I2C peripheral for touch communication
+
+      # esp_lcd_touch_config_t fields for touch configuration
+      touch_config:
+        x_max: 320                        # Maximum X coordinate (BSP_LCD_H_RES)
+        y_max: 240                        # Maximum Y coordinate (BSP_LCD_V_RES)
+        flags:
+          swap_xy: false
+          mirror_x: true
+          mirror_y: false
+
+  - name: camera             # The name of the device, must be unique
+    type: camera             # The type of the camera, must be equal to "camera"
+    sub_type: "csi"          # The bus type: csi
+    config:
+      # CSI interface configuration (used when bus_type is "csi")
+      csi_config:
+        reset_io: 1           # [IO] GPIO pin for reset signal (example value)
+        pwdn_io: 2            # [IO] GPIO pin for power down signal (example value)
+        dont_init_ldo: true   # [TO_BE_CONFIRMED] If true, MIPI-CSI video device will not initialize the LDO (default: true)
+                              # If using the periph_ldo in esp_board_manager to manage the ldo peripheral, it needs to be set to true
+        xclk_config:
+          xclk_pin: -1        # [IO] GPIO pin for camera XCLK signal (default: -1, not connected)
+          xclk_freq_hz: 20000000 # [TO_BE_CONFIRMED] XCLK frequency in Hz (default: 20MHz)
+
+    # I2C configuration for camera control
+    peripherals:
+      - name: i2c_master      # [TO_BE_CONFIRMED] I2C bus name for camera control
+        frequency: 400000     # I2C frequency in Hz
+      - name: ldo_mipi        # [TO_BE_CONFIRMED] LDO peripheral for csi power management
+
+  # ADC Button Devices Configuration for multiple buttons
+  - name: adc_button_group
+    type: button
+    sub_type: adc_multi
+    config:
+      long_press_time: 2000
+      short_press_time: 100
+      events_cfg:
+        press_down: true
+        press_up: true
+        single_click: true
+        double_click: true
+        multi_click: false
+        long_press_start: true
+        long_press_up: true
+        long_press_hold: false
+        press_repeat: false
+        press_repeat_done: false
+        press_end: false
+      button_num: 6
+      max_voltage: 3000
+      voltage_range: [380, 820, 1110, 1650, 1980, 2410]
+      button_labels: ["VOLUME_UP", "VOLUME_DOWN", "SET", "PLAY", "MUTE", "REC"]
+    peripherals:
+    - name: adc_oneshot
