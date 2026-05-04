@@ -15,4 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_board_manager: ^0.5.9
-  espressif/esp_lcd_ili9881c: ^1.1.0
+  espressif/esp_audio_simple_player: ^0.9.1
