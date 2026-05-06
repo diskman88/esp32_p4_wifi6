@@ -1,145 +1,265 @@
 #include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "esp_board_manager_includes.h"
-#include "driver/ledc.h"
-#include "periph_ledc.h"
-#include "esp_lcd_panel_ops.h"
-#include "logo_labplus_ledong_v2_320x172_lcd.h"
-#include "esp_audio_simple_player.h"
-#include "dev_audio_codec.h"
-#include "esp_codec_dev.h"
+#include "wav_header.h"
 
-static const char *TAG = "MAIN";
+static const char *TAG = "RECORD_AND_PLAY";
 
-static esp_codec_dev_handle_t g_codec_dev = NULL;
+#define DEFAULT_REC_URL          "/sdcard/test.wav"
+#define DEFAULT_SAMPLE_RATE      16000
+#define DEFAULT_CHANNELS         2
+#define DEFAULT_BITS_PER_SAMPLE  16
+#define DEFAULT_DURATION_SECONDS 5
+#define DEFAULT_REC_GAIN         30
+#define DEFAULT_PLAY_VOL         60
 
-static int out_data_callback(uint8_t *data, int data_size, void *ctx)
+static esp_err_t record_audio_to_sdcard(void)
 {
-    if (g_codec_dev) {
-        return esp_codec_dev_write(g_codec_dev, data, data_size);
+    ESP_LOGI(TAG, "Recording to %s", DEFAULT_REC_URL);
+    esp_err_t ret = ESP_OK;
+    dev_audio_codec_handles_t *adc_handle = NULL;
+    FILE *fp = NULL;
+
+    const size_t buffer_size = 4096;
+    uint8_t *recording_buffer = malloc(buffer_size);
+    if (recording_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate recording buffer");
+        return ESP_FAIL;
     }
-    return 0;
+
+    ret = esp_board_manager_init_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize audio ADC device");
+        free(recording_buffer);
+        return ret;
+    }
+
+    ret = esp_board_manager_init_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount SD card");
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+        free(recording_buffer);
+        return ret;
+    }
+
+    ret = esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_ADC, (void **)&adc_handle);
+    if (ret != ESP_OK || adc_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to get ADC device handle");
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+        free(recording_buffer);
+        return ret;
+    }
+
+    fp = fopen(DEFAULT_REC_URL, "wb");
+    if (fp == NULL) {
+        ESP_LOGE(TAG, "Failed to open file %s", DEFAULT_REC_URL);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+        free(recording_buffer);
+        return ESP_FAIL;
+    }
+
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = DEFAULT_SAMPLE_RATE,
+        .channel = DEFAULT_CHANNELS,
+        .bits_per_sample = DEFAULT_BITS_PER_SAMPLE,
+    };
+    ret = esp_codec_dev_open(adc_handle->codec_dev, &fs);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "Failed to open codec device");
+        fclose(fp);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+        free(recording_buffer);
+        return ESP_FAIL;
+    }
+
+    ret = esp_codec_dev_set_in_gain(adc_handle->codec_dev, DEFAULT_REC_GAIN);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "Failed to set ADC volume, continuing anyway");
+    }
+
+    ret = write_wav_header(fp, fs.sample_rate, fs.channel, fs.bits_per_sample, DEFAULT_DURATION_SECONDS);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write WAV header");
+        esp_codec_dev_close(adc_handle->codec_dev);
+        fclose(fp);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+        free(recording_buffer);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Record WAV file info: %" PRIu32 " Hz, %" PRIu16 " channels, %" PRIu16 " bits",
+             fs.sample_rate, fs.channel, fs.bits_per_sample);
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "Starting recording...");
+    uint32_t total_bytes = 0;
+    uint32_t record_duration_ms = DEFAULT_DURATION_SECONDS * 1000;
+    uint32_t start_time = esp_timer_get_time() / 1000;
+
+    while ((esp_timer_get_time() / 1000) - start_time < record_duration_ms) {
+        ret = esp_codec_dev_read(adc_handle->codec_dev, recording_buffer, buffer_size);
+        if (ret == ESP_CODEC_DEV_OK) {
+            size_t bytes_written = fwrite(recording_buffer, 1, buffer_size, fp);
+            if (bytes_written != buffer_size) {
+                ESP_LOGE(TAG, "Failed to write audio data to file");
+                break;
+            }
+            total_bytes += bytes_written;
+        } else {
+            ESP_LOGE(TAG, "Failed to read audio data from ADC");
+            break;
+        }
+        ESP_LOGI(TAG, "Recording... %" PRIu32 " ms", (esp_timer_get_time() / 1000) - start_time);
+    }
+
+    ESP_LOGI(TAG, "Recording completed. Total bytes recorded: %" PRIu32, total_bytes);
+    esp_codec_dev_close(adc_handle->codec_dev);
+    free(recording_buffer);
+    fclose(fp);
+
+    ret = esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_ADC);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to deinitialize audio ADC device");
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
-static int mock_event_callback(esp_asp_event_pkt_t *event, void *ctx)
+static esp_err_t play_audio_from_sdcard(void)
 {
-    if (event->type == ESP_ASP_EVENT_TYPE_MUSIC_INFO) {
-        esp_asp_music_info_t info = {0};
-        memcpy(&info, event->payload, event->payload_size);
-        ESP_LOGI(TAG, "Music info: sample_rate=%d, channels=%d, bits=%d",
-                 info.sample_rate, info.channels, info.bits);
-        esp_codec_dev_sample_info_t fs = {
-            .sample_rate = info.sample_rate,
-            .channel = info.channels,
-            .bits_per_sample = info.bits,
-        };
-        int ret = esp_codec_dev_open(g_codec_dev, &fs);
+    ESP_LOGI(TAG, "Playing from %s", DEFAULT_REC_URL);
+    esp_err_t ret = ESP_OK;
+    dev_audio_codec_handles_t *dac_handle = NULL;
+    FILE *fp = NULL;
+    uint8_t *playback_buffer = NULL;
+
+    ret = esp_board_manager_init_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize audio DAC device");
+        return ret;
+    }
+
+    ret = esp_board_manager_get_device_handle(ESP_BOARD_DEVICE_NAME_AUDIO_DAC, (void **)&dac_handle);
+    if (ret != ESP_OK || dac_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to get DAC device handle");
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+        return ret;
+    }
+
+    fp = fopen(DEFAULT_REC_URL, "rb");
+    if (fp == NULL) {
+        ESP_LOGE(TAG, "Failed to open file %s", DEFAULT_REC_URL);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+        return ESP_FAIL;
+    }
+
+    uint32_t sample_rate;
+    uint16_t channels, bits_per_sample;
+    ret = read_wav_header(fp, &sample_rate, &channels, &bits_per_sample);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read WAV header");
+        fclose(fp);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Play WAV file info: %" PRIu32 " Hz, %" PRIu16 " channels, %" PRIu16 " bits",
+             sample_rate, channels, bits_per_sample);
+
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = sample_rate,
+        .channel = channels,
+        .bits_per_sample = bits_per_sample,
+    };
+    ret = esp_codec_dev_open(dac_handle->codec_dev, &fs);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "Failed to open codec device");
+        fclose(fp);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+        return ESP_FAIL;
+    }
+
+    ret = esp_codec_dev_set_out_vol(dac_handle->codec_dev, DEFAULT_PLAY_VOL);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "Failed to set DAC volume, continuing anyway");
+    }
+
+    const size_t buffer_size = 1 * 1024;
+    playback_buffer = malloc(buffer_size);
+    if (playback_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate playback buffer");
+        esp_codec_dev_close(dac_handle->codec_dev);
+        fclose(fp);
+        esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Starting playback...");
+    size_t bytes_read;
+    while ((bytes_read = fread(playback_buffer, 1, buffer_size, fp)) > 0) {
+        ret = esp_codec_dev_write(dac_handle->codec_dev, playback_buffer, bytes_read);
         if (ret != ESP_CODEC_DEV_OK) {
-            ESP_LOGE(TAG, "Failed to open codec device: %d", ret);
-        }
-        ret = esp_codec_dev_set_out_vol(g_codec_dev, 80);
-        if (ret != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "Failed to set volume: %d", ret);
-        } else {
-            ESP_LOGI(TAG, "Volume set to 80%%");
-        }
-    } else if (event->type == ESP_ASP_EVENT_TYPE_STATE) {
-        esp_asp_state_t st = 0;
-        memcpy(&st, event->payload, event->payload_size);
-        ESP_LOGI(TAG, "State: %d, %s", st, esp_audio_simple_player_state_to_str(st));
-        if (st == ESP_ASP_STATE_STOPPED || st == ESP_ASP_STATE_FINISHED) {
-            esp_codec_dev_close(g_codec_dev);
+            ESP_LOGE(TAG, "Failed to write to DAC");
+            break;
         }
     }
-    return 0;
+
+    ESP_LOGI(TAG, "Playback completed.");
+    free(playback_buffer);
+    fclose(fp);
+    esp_codec_dev_close(dac_handle->codec_dev);
+
+    ret = esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_AUDIO_DAC);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to deinitialize audio DAC device");
+        return ret;
+    }
+
+    ret = esp_board_manager_deinit_device_by_name(ESP_BOARD_DEVICE_NAME_FS_SDCARD);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to deinitialize SD card filesystem");
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "Initializing board manager...");
+
     int ret = esp_board_manager_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize board manager");
         return;
     }
 
-    dev_display_lcd_handles_t *lcd_handle;
-    ret = esp_board_manager_get_device_handle("display_lcd", (void **)&lcd_handle);
+    ESP_LOGI(TAG, "=== Recording Audio ===");
+    ret = record_audio_to_sdcard();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get LCD device");
+        ESP_LOGE(TAG, "Recording failed");
         return;
     }
 
-    periph_ledc_handle_t *ledc_handle;
-    ret = esp_board_manager_get_device_handle("lcd_brightness", (void **)&ledc_handle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    ESP_LOGI(TAG, "=== Playing Audio ===");
+    ret = play_audio_from_sdcard();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get LEDC device");
-        return;
-    }
-    ledc_set_duty(ledc_handle->speed_mode, ledc_handle->channel, 50);
-    ledc_update_duty(ledc_handle->speed_mode, ledc_handle->channel);
-    uint16_t *color_data=heap_caps_malloc(600*1024 * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    memcpy(color_data, logo_en_320x172_lcd, 1024 * 600 * sizeof(uint16_t));
-    esp_lcd_panel_draw_bitmap(lcd_handle->panel_handle, 0, 0,1024,600, logo_en_320x172_lcd);
-
-    ESP_LOGI(TAG, "Initializing SD card...");
-    ret = esp_board_manager_init_device_by_name("fs_sdcard");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init SD card");
+        ESP_LOGE(TAG, "Playback failed");
         return;
     }
 
-    ESP_LOGI(TAG, "Initializing audio DAC...");
-    ret = esp_board_manager_init_device_by_name("audio_dac");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init audio DAC");
-        return;
-    }
-
-    dev_audio_codec_handles_t *audio_dac_handle;
-    ret = esp_board_manager_get_device_handle("audio_dac", (void **)&audio_dac_handle);
-    if (ret != ESP_OK || audio_dac_handle == NULL) {
-        ESP_LOGE(TAG, "Failed to get audio DAC handle");
-        return;
-    }
-    g_codec_dev = audio_dac_handle->codec_dev;
-
-    esp_asp_cfg_t asp_cfg = {
-        .in = {
-            .cb = NULL,
-            .user_ctx = NULL,
-        },
-        .out = {
-            .cb = out_data_callback,
-            .user_ctx = NULL,
-        },
-        .task_prio = 5,
-        .task_stack = 8 * 1024,
-    };
-
-    esp_asp_handle_t player = NULL;
-    esp_gmf_err_t gmf_err = esp_audio_simple_player_new(&asp_cfg, &player);
-    if (gmf_err != ESP_GMF_ERR_OK) {
-        ESP_LOGE(TAG, "Failed to create audio player: %d", gmf_err);
-        return;
-    }
-
-    esp_audio_simple_player_set_event(player, mock_event_callback, NULL);
-
-    ESP_LOGI(TAG, "Playing audio from file://sdcard/test.mp3...");
-    gmf_err = esp_audio_simple_player_run_to_end(player, "file://sdcard/test.mp3", NULL);
-    if (gmf_err != ESP_GMF_ERR_OK) {
-        ESP_LOGE(TAG, "Failed to play audio: %d", gmf_err);
-        esp_audio_simple_player_destroy(player);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Playback completed!");
-
-    esp_audio_simple_player_destroy(player);
-
+    ESP_LOGI(TAG, "Record and Play example finished!");
     esp_board_manager_print_board_info();
-    esp_board_manager_print();
 }
