@@ -1,0 +1,3 @@
+[submodule "gmf_board_manager_docs"]
+	path = gmf_board_manager_docs
+	url = https://github.com/diskman88/gmf_board_manager_docs.git
