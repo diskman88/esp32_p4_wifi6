@@ -1,70 +1,36 @@
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_board_manager_includes.h"
 #include "driver/ledc.h"
 #include "periph_ledc.h"
 #include "esp_lcd_panel_ops.h"
-#include "logo_labplus_ledong_v2_320x172_lcd.h"
-#include "esp_audio_simple_player.h"
-#include "dev_audio_codec.h"
-#include "esp_codec_dev.h"
+#include "dev_display_lcd.h"
+#include "dev_camera.h"
+#include "esp_video_device.h"
+#include "linux/videodev2.h"
 
-static const char *TAG = "MAIN";
+static const char *TAG = "CAMERA_DISPLAY";
 
-static esp_codec_dev_handle_t g_codec_dev = NULL;
-
-static int out_data_callback(uint8_t *data, int data_size, void *ctx)
-{
-    if (g_codec_dev) {
-        return esp_codec_dev_write(g_codec_dev, data, data_size);
-    }
-    return 0;
-}
-
-static int mock_event_callback(esp_asp_event_pkt_t *event, void *ctx)
-{
-    if (event->type == ESP_ASP_EVENT_TYPE_MUSIC_INFO) {
-        esp_asp_music_info_t info = {0};
-        memcpy(&info, event->payload, event->payload_size);
-        ESP_LOGI(TAG, "Music info: sample_rate=%d, channels=%d, bits=%d",
-                 info.sample_rate, info.channels, info.bits);
-        esp_codec_dev_sample_info_t fs = {
-            .sample_rate = info.sample_rate,
-            .channel = info.channels,
-            .bits_per_sample = info.bits,
-        };
-        int ret = esp_codec_dev_open(g_codec_dev, &fs);
-        if (ret != ESP_CODEC_DEV_OK) {
-            ESP_LOGE(TAG, "Failed to open codec device: %d", ret);
-        }
-        ret = esp_codec_dev_set_out_vol(g_codec_dev, 80);
-        if (ret != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "Failed to set volume: %d", ret);
-        } else {
-            ESP_LOGI(TAG, "Volume set to 80%%");
-        }
-    } else if (event->type == ESP_ASP_EVENT_TYPE_STATE) {
-        esp_asp_state_t st = 0;
-        memcpy(&st, event->payload, event->payload_size);
-        ESP_LOGI(TAG, "State: %d, %s", st, esp_audio_simple_player_state_to_str(st));
-        if (st == ESP_ASP_STATE_STOPPED || st == ESP_ASP_STATE_FINISHED) {
-            esp_codec_dev_close(g_codec_dev);
-        }
-    }
-    return 0;
-}
+void display_test_pattern(dev_display_lcd_handles_t *lcd_handle);
 
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "Initializing board manager...");
+    
     int ret = esp_board_manager_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize board manager");
         return;
     }
 
+    ESP_LOGI(TAG, "Getting LCD device handle...");
     dev_display_lcd_handles_t *lcd_handle;
     ret = esp_board_manager_get_device_handle("display_lcd", (void **)&lcd_handle);
     if (ret != ESP_OK) {
@@ -72,74 +38,208 @@ void app_main(void)
         return;
     }
 
+    ESP_LOGI(TAG, "Setting LCD brightness...");
     periph_ledc_handle_t *ledc_handle;
     ret = esp_board_manager_get_device_handle("lcd_brightness", (void **)&ledc_handle);
+    if (ret == ESP_OK) {
+        ledc_set_duty(ledc_handle->speed_mode, ledc_handle->channel, 0);
+        ledc_update_duty(ledc_handle->speed_mode, ledc_handle->channel);
+    }
+
+    ESP_LOGI(TAG, "Initializing camera...");
+    ret = esp_board_manager_init_device_by_name("camera");
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get LEDC device");
-        return;
-    }
-    ledc_set_duty(ledc_handle->speed_mode, ledc_handle->channel, 50);
-    ledc_update_duty(ledc_handle->speed_mode, ledc_handle->channel);
-    uint16_t *color_data=heap_caps_malloc(600*1024 * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    memcpy(color_data, logo_en_320x172_lcd, 1024 * 600 * sizeof(uint16_t));
-    esp_lcd_panel_draw_bitmap(lcd_handle->panel_handle, 0, 0,1024,600, logo_en_320x172_lcd);
-
-    ESP_LOGI(TAG, "Initializing SD card...");
-    ret = esp_board_manager_init_device_by_name("fs_sdcard");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init SD card");
+        ESP_LOGE(TAG, "Failed to initialize camera");
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
         return;
     }
 
-    ESP_LOGI(TAG, "Initializing audio DAC...");
-    ret = esp_board_manager_init_device_by_name("audio_dac");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init audio DAC");
+    ESP_LOGI(TAG, "Getting camera device handle...");
+    dev_camera_handle_t *camera_handle;
+    ret = esp_board_manager_get_device_handle("camera", (void **)&camera_handle);
+    if (ret != ESP_OK || camera_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to get camera handle");
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Camera device path: %s", camera_handle->dev_path);
+
+    ESP_LOGI(TAG, "Opening camera device...");
+    int fd = open(camera_handle->dev_path, O_RDWR);
+    if (fd < 0) {
+        ESP_LOGE(TAG, "Failed to open camera device: %s", camera_handle->dev_path);
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
         return;
     }
 
-    dev_audio_codec_handles_t *audio_dac_handle;
-    ret = esp_board_manager_get_device_handle("audio_dac", (void **)&audio_dac_handle);
-    if (ret != ESP_OK || audio_dac_handle == NULL) {
-        ESP_LOGE(TAG, "Failed to get audio DAC handle");
-        return;
-    }
-    g_codec_dev = audio_dac_handle->codec_dev;
+    ESP_LOGI(TAG, "Configuring camera format...");
+    struct v4l2_format fmt = {0};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = 800;
+    fmt.fmt.pix.height = 640;
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
 
-    esp_asp_cfg_t asp_cfg = {
-        .in = {
-            .cb = NULL,
-            .user_ctx = NULL,
-        },
-        .out = {
-            .cb = out_data_callback,
-            .user_ctx = NULL,
-        },
-        .task_prio = 5,
-        .task_stack = 8 * 1024,
-    };
-
-    esp_asp_handle_t player = NULL;
-    esp_gmf_err_t gmf_err = esp_audio_simple_player_new(&asp_cfg, &player);
-    if (gmf_err != ESP_GMF_ERR_OK) {
-        ESP_LOGE(TAG, "Failed to create audio player: %d", gmf_err);
+    ret = ioctl(fd, VIDIOC_S_FMT, &fmt);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "Failed to set format");
+        close(fd);
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
         return;
     }
 
-    esp_audio_simple_player_set_event(player, mock_event_callback, NULL);
+    ESP_LOGI(TAG, "Camera configured: %dx%d, format=%d", 
+             fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.pixelformat);
 
-    ESP_LOGI(TAG, "Playing audio from file://sdcard/test.mp3...");
-    gmf_err = esp_audio_simple_player_run_to_end(player, "file://sdcard/test.mp3", NULL);
-    if (gmf_err != ESP_GMF_ERR_OK) {
-        ESP_LOGE(TAG, "Failed to play audio: %d", gmf_err);
-        esp_audio_simple_player_destroy(player);
+    ESP_LOGI(TAG, "Requesting buffer...");
+    struct v4l2_requestbuffers req = {0};
+    req.count = 4;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+
+    ret = ioctl(fd, VIDIOC_REQBUFS, &req);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "Failed to request buffers");
+        close(fd);
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
         return;
     }
 
-    ESP_LOGI(TAG, "Playback completed!");
+    ESP_LOGI(TAG, "Requested %d buffers", req.count);
 
-    esp_audio_simple_player_destroy(player);
+    void **buffers = calloc(req.count, sizeof(void *));
+    if (!buffers) {
+        ESP_LOGE(TAG, "Failed to allocate buffer pointers");
+        close(fd);
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
+        return;
+    }
 
+    ESP_LOGI(TAG, "Mapping buffers...");
+    struct v4l2_buffer buf = {0};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+
+    for (uint32_t i = 0; i < req.count; i++) {
+        buf.index = i;
+        ret = ioctl(fd, VIDIOC_QUERYBUF, &buf);
+        if (ret < 0) {
+            ESP_LOGE(TAG, "Failed to query buffer %d", i);
+            for (uint32_t j = 0; j < i; j++) {
+                munmap(buffers[j], buf.length);
+            }
+            free(buffers);
+            close(fd);
+            ESP_LOGI(TAG, "Displaying test pattern instead...");
+            display_test_pattern(lcd_handle);
+            return;
+        }
+
+        buffers[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+        if (buffers[i] == MAP_FAILED) {
+            ESP_LOGE(TAG, "Failed to mmap buffer %d", i);
+            for (uint32_t j = 0; j < i; j++) {
+                munmap(buffers[j], buf.length);
+            }
+            free(buffers);
+            close(fd);
+            ESP_LOGI(TAG, "Displaying test pattern instead...");
+            display_test_pattern(lcd_handle);
+            return;
+        }
+
+        ret = ioctl(fd, VIDIOC_QBUF, &buf);
+        if (ret < 0) {
+            ESP_LOGE(TAG, "Failed to queue buffer %d", i);
+        }
+    }
+
+    ESP_LOGI(TAG, "Starting capture...");
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ret = ioctl(fd, VIDIOC_STREAMON, &type);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "Failed to start streaming");
+        for (uint32_t i = 0; i < req.count; i++) {
+            munmap(buffers[i], buf.length);
+        }
+        free(buffers);
+        close(fd);
+        ESP_LOGI(TAG, "Displaying test pattern instead...");
+        display_test_pattern(lcd_handle);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Capturing and displaying...");
+    while (1) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+
+        ret = ioctl(fd, VIDIOC_DQBUF, &buf);
+        if (ret < 0) {
+            ESP_LOGE(TAG, "Failed to dequeue buffer");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        esp_lcd_panel_draw_bitmap(lcd_handle->panel_handle, 0, 0,
+                                  fmt.fmt.pix.width, fmt.fmt.pix.height, buffers[buf.index]);
+
+        ret = ioctl(fd, VIDIOC_QBUF, &buf);
+        if (ret < 0) {
+            ESP_LOGE(TAG, "Failed to re-queue buffer");
+        }
+    }
+
+    ioctl(fd, VIDIOC_STREAMOFF, &type);
+    for (uint32_t i = 0; i < req.count; i++) {
+        munmap(buffers[i], buf.length);
+    }
+    free(buffers);
+    close(fd);
     esp_board_manager_print_board_info();
-    esp_board_manager_print();
+}
+
+void display_test_pattern(dev_display_lcd_handles_t *lcd_handle)
+{
+    ESP_LOGI(TAG, "Displaying color bars test pattern...");
+    
+    uint16_t *test_buffer = heap_caps_malloc(1024 * 600 * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    if (!test_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate test buffer");
+        return;
+    }
+
+    for (int y = 0; y < 600; y++) {
+        for (int x = 0; x < 1024; x++) {
+            uint8_t bar = (x * 8) / 1024;
+            uint16_t color;
+            switch (bar) {
+                case 0: color = 0xF800; break; // Red
+                case 1: color = 0x07E0; break; // Green
+                case 2: color = 0x001F; break; // Blue
+                case 3: color = 0xFFE0; break; // Yellow
+                case 4: color = 0xF81F; break; // Magenta
+                case 5: color = 0x07FF; break; // Cyan
+                case 6: color = 0xFFFF; break; // White
+                default: color = 0x0000; break; // Black
+            }
+            test_buffer[y * 1024 + x] = color;
+        }
+    }
+
+    esp_lcd_panel_draw_bitmap(lcd_handle->panel_handle, 0, 0, 1024, 600, test_buffer);
+    
+    free(test_buffer);
+    
+    while (1) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
 }
