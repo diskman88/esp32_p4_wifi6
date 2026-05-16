@@ -14,8 +14,8 @@ static const char *TAG = "RECORD_AND_PLAY";
 #define DEFAULT_CHANNELS         2
 #define DEFAULT_BITS_PER_SAMPLE  16
 #define DEFAULT_DURATION_SECONDS 5
-#define DEFAULT_REC_GAIN         30
-#define DEFAULT_PLAY_VOL         60
+#define DEFAULT_REC_GAIN         40
+#define DEFAULT_PLAY_VOL         100
 
 static esp_err_t record_audio_to_sdcard(void)
 {
